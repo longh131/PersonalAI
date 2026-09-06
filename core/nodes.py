@@ -15,6 +15,39 @@ from memory.manager import MemoryManager, PersistDecision
 from tools.builtin import looks_like_image_path
 from tools.registry import ToolRegistry
 
+TOOL_PROGRESS_LABELS = {
+    "read_file": "读取文件",
+    "search_files": "搜索文件",
+    "web_search": "搜索网页",
+    "execute_code": "执行代码",
+    "capture_screen": "截屏",
+    "analyze_image": "识别图片",
+    "foreground_window": "查看当前窗口",
+    "clipboard_text": "读取剪贴板",
+    "list_windows": "列出窗口",
+    "open_app": "打开应用",
+    "focus_window": "切换窗口",
+    "calendar_agenda": "查看日程",
+    "set_reminder": "设定提醒",
+    "list_reminders": "查看提醒",
+    "system_status": "查看舰况",
+    "forget_memory": "忘掉记忆",
+    "correct_memory": "纠正记忆",
+    "upsert_entity": "记下人物项目",
+    "list_entities": "查看人物项目",
+    "forget_entity": "忘掉人物项目",
+    "set_protocol": "设置协议",
+    "list_protocols": "查看协议",
+    "daily_briefing": "整理简报",
+    "background_task": "排队后台任务",
+    "set_volume": "调节音量",
+    "set_dnd": "设置勿扰",
+    "lock_pc": "锁定电脑",
+    "delete_file": "删除文件",
+    "power_action": "电源操作",
+    "_reply": "整理答复",
+}
+
 
 class GraphNodes:
     """Node implementations closed over engine dependencies."""
@@ -27,6 +60,7 @@ class GraphNodes:
         identity: IdentityLoader,
         max_tool_iterations: int,
         vision: Any | None = None,
+        on_progress: Any | None = None,
     ) -> None:
         self.memory = memory
         self.llm = llm
@@ -34,6 +68,7 @@ class GraphNodes:
         self.identity = identity
         self.max_tool_iterations = max_tool_iterations
         self.vision = vision
+        self.on_progress = on_progress
 
     async def parse_input(self, state: AgentState) -> dict[str, Any]:
         """Normalize the utterance and detect coarse intent / image paths."""
@@ -45,6 +80,8 @@ class GraphNodes:
             intent["kind"] = "remember"
         if any(token in text for token in ("截屏", "截图", "看看屏幕", "看下屏幕", "scan screen")):
             intent["kind"] = "screen"
+        if any(token in text for token in ("今天简报", "早报", "晨间简报", "我要走了", "下班了", "离开简报", "我先走了")):
+            intent["kind"] = "briefing"
         if looks_like_image_path(text) or state.get("input_type") == "image":
             intent["kind"] = "image"
             intent["image_path"] = text.strip().strip('"')
@@ -140,6 +177,14 @@ class GraphNodes:
                     "arguments": {"path": state["image_path"]},
                 }
             ]
+        if intent.get("kind") == "briefing" and not tool_calls and int(state.get("iteration") or 0) == 0:
+            user = str(state.get("user_input") or "")
+            brief_kind = "leaving" if any(token in user for token in ("走了", "下班", "离开")) else "morning"
+            if any(token in user for token in ("早报", "晨间")):
+                brief_kind = "morning"
+            tool_calls = [
+                {"id": "auto_brief", "name": "daily_briefing", "arguments": {"kind": brief_kind}}
+            ]
         decision = "use_tool" if tool_calls else "respond"
         iteration = int(state.get("iteration") or 0)
         if decision == "use_tool":
@@ -169,6 +214,16 @@ class GraphNodes:
     async def execute_tools(self, state: AgentState) -> dict[str, Any]:
         """Run requested tools and append tool messages for the next reason hop."""
         calls = state.get("tool_calls") or []
+        for call in calls:
+            name = str(call.get("name") or "")
+            args = call.get("arguments") or {}
+            preview = ""
+            if isinstance(args, dict):
+                preview = str(next(iter(args.values()), "") or "")[:80]
+            if self.on_progress is not None:
+                label = TOOL_PROGRESS_LABELS.get(name, name)
+                await self.on_progress(name, f"{label} {preview}".strip())
+            await self._touch_working_task(state, "in_progress", name)
         results = await self.tools.execute_many(calls)
         messages: list[dict[str, Any]] = []
         if calls:
@@ -204,6 +259,8 @@ class GraphNodes:
 
     async def generate_reply(self, state: AgentState) -> dict[str, Any]:
         """Produce the user-facing reply, including LLM errors and tool summaries."""
+        if self.on_progress is not None and state.get("tool_results"):
+            await self.on_progress("_reply", "正在整理答复")
         if state.get("error") and not (state.get("reasoning") or state.get("tool_results")):
             text = f"这一轮推理失败了：{state['error']}。请检查网络或 API Key 后再说一次。"
             return {"response": text, "messages": [{"role": "assistant", "content": text}]}
@@ -235,7 +292,29 @@ class GraphNodes:
         except Exception as exc:  # noqa: BLE001
             logger.exception("generate_reply LLM error")
             text = existing or f"生成回复时出错：{exc}"
+        if tool_used:
+            await self._touch_working_task(state, "completed", "done")
         return {"response": text, "messages": [{"role": "assistant", "content": text}]}
+
+    async def _touch_working_task(self, state: AgentState, status: str, step: str) -> None:
+        """Create or update the in-flight working-memory task for this turn."""
+        session_id = state.get("session_id") or ""
+        if not session_id or self.memory.working is None:
+            return
+        try:
+            active = await self.memory.working.get_active(session_id)
+            title = (state.get("user_input") or "任务")[:40]
+            payload: dict[str, Any] = {
+                "title": (active or {}).get("title") or title,
+                "goal": (active or {}).get("goal") or (state.get("user_input") or ""),
+                "status": status,
+                "current_step": step,
+            }
+            if active:
+                payload["id"] = active["id"]
+            await self.memory.upsert_task(session_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("working task update skipped: {}", exc)
 
     async def update_memory(self, state: AgentState) -> dict[str, Any]:
         """Always log the turn; persist long-term memory only when warranted."""

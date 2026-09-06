@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "data/personal_ai.db"
     embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     log_level: str = "INFO"
-    max_tool_iterations: int = 3
+    max_tool_iterations: int = 8
     short_term_window: int = 16
 
     voice_enabled: bool = True
@@ -63,9 +63,15 @@ class Settings(BaseSettings):
     voice_start_ratio: float = 8.0
     voice_keep_ratio: float = 4.0
     voice_hotkey: str = "CTRL+SHIFT+L"
-    voice_barge_in_grace: float = 0.4
-    voice_barge_in_energy: float = 0.02
-    voice_barge_in_ratio: float = 2.5
+    voice_barge_in_grace: float = 0.8
+    voice_barge_in_energy: float = 0.035
+    voice_barge_in_ratio: float = 3.0
+    wakeword_enabled: bool = True
+    tray_enabled: bool = True
+    wake_max_utterance: float = 4.0
+    web_search_backend: str = "bing"
+    web_search_timeout: float = 8.0
+    web_search_proxy: str = ""
 
     def resolve_sqlite_path(self) -> Path:
         """Return an absolute SQLite path, creating the parent directory."""

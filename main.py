@@ -136,8 +136,15 @@ def _download_sensevoice(dest: Path) -> bool:
                 with client.stream("GET", url) as response:
                     response.raise_for_status()
                     with archive.open("wb") as handle:
+                        total = 0
+                        last_print = 0
                         for chunk in response.iter_bytes(1024 * 64):
                             handle.write(chunk)
+                            total += len(chunk)
+                            if total - last_print >= 10 * 1024 * 1024:
+                                print(f"    已下载 {total / 1024 / 1024:.0f} MB", flush=True)
+                                last_print = total
+                    print(f"    下载完成 {total / 1024 / 1024:.0f} MB", flush=True)
             last_error = ""
             break
         except Exception as exc:  # noqa: BLE001

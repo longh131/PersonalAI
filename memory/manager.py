@@ -13,8 +13,11 @@ import numpy as np
 from loguru import logger
 
 from config.settings import Settings
+from memory.entities import EntityStore
 from memory.experience import ExperienceMemory
 from memory.long_term import LongTermMemory
+from memory.protocols import ProtocolStore
+from memory.reminders import ReminderStore
 from memory.self_memory import SelfMemory
 from memory.short_term import ShortTermMemory
 from memory.working import WorkingMemory
@@ -49,7 +52,8 @@ CREATE TABLE IF NOT EXISTS memories (
     last_accessed   TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    metadata_json   TEXT NOT NULL DEFAULT '{}'
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    forgotten       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
@@ -94,11 +98,55 @@ CREATE TABLE IF NOT EXISTS identity_snapshots (
     note          TEXT,
     created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message    TEXT NOT NULL,
+    due_at     TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK(status IN ('pending','fired','cancelled')),
+    created_at TEXT NOT NULL,
+    fired_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
+
+CREATE TABLE IF NOT EXISTS entities (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK(kind IN ('person','project','preference')),
+    name       TEXT NOT NULL,
+    relation   TEXT NOT NULL DEFAULT '',
+    notes      TEXT NOT NULL DEFAULT '',
+    forgotten  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS protocols (
+    key         TEXT PRIMARY KEY,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+
+async def _migrate_schema(db: aiosqlite.Connection) -> None:
+    """Add columns that CREATE TABLE IF NOT EXISTS will not patch on old files."""
+    cursor = await db.execute("PRAGMA table_info(memories)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "forgotten" not in columns:
+        await db.execute("ALTER TABLE memories ADD COLUMN forgotten INTEGER NOT NULL DEFAULT 0")
+
 
 SKIP_PHRASES = ("你好", "您好", "在吗", "嗨", "hi", "hello", "hey", "早上好", "晚安")
 FORCE_SAVE_MARKERS = ("记住", "记下", "别忘了", "记一下", "请记住")
 CORRECTION_MARKERS = ("不对", "你错了", "纠正", "不是这样", "以后不要")
+FORGET_MARKERS = ("忘掉", "忘记这件事", "别再记", "删除记忆")
 
 
 def _utc_now() -> str:
@@ -186,6 +234,7 @@ class MemoryContext:
     experience_hits: list[MemoryHit]
     self_hits: list[MemoryHit]
     self_knowledge: str
+    entity_block: str = ""
 
 
 @dataclass(slots=True)
@@ -218,6 +267,9 @@ class MemoryManager:
         self.long_term: LongTermMemory | None = None
         self.experience: ExperienceMemory | None = None
         self.self_memory: SelfMemory | None = None
+        self.reminders: ReminderStore | None = None
+        self.entities: EntityStore | None = None
+        self.protocols: ProtocolStore | None = None
 
     def encode(self, text: str) -> np.ndarray:
         """Embed text using the override or the configured embedder."""
@@ -233,6 +285,7 @@ class MemoryManager:
         self._db = await aiosqlite.connect(str(path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA_SQL)
+        await _migrate_schema(self._db)
         await self._db.commit()
         if self._encode_override is None:
             self.embedder.load()
@@ -242,6 +295,9 @@ class MemoryManager:
         self.long_term = LongTermMemory(self._db, encode, model_name)
         self.experience = ExperienceMemory(self._db, encode, model_name)
         self.self_memory = SelfMemory(self._db, encode, model_name)
+        self.reminders = ReminderStore(self._db)
+        self.entities = EntityStore(self._db)
+        self.protocols = ProtocolStore(self._db)
         if await self.self_memory.get("capabilities") is None:
             await self.self_memory.upsert(
                 "capabilities",
@@ -285,14 +341,21 @@ class MemoryManager:
             for item in long_hits
             if item.get("kind") in {"fact", "preference", "relationship"}
         ]
+        entity_block = ""
+        if self.entities is not None:
+            entity_block = self.entities.format_list(await self.entities.list_active())
+            if "还没有记下" in entity_block:
+                entity_block = ""
+        overlay_parts = [part for part in (entity_block, "\n".join(f"- {bit}" for bit in user_bits)) if part]
         return MemoryContext(
-            identity_overlay="\n".join(f"- {bit}" for bit in user_bits),
+            identity_overlay="\n".join(overlay_parts),
             short_term_messages=self.short_term.window(),
             working_snapshot=self.working.snapshot(active),
             long_term_hits=[_as_hit(item, "long_term") for item in long_hits],
             experience_hits=[_as_hit(item, "experience") for item in exp_hits],
             self_hits=[_as_hit(item, "self") for item in self_hits],
             self_knowledge=await self.self_memory.all_text(),
+            entity_block=entity_block,
         )
 
     async def remember_turn(self, session_id: str, role: str, content: str) -> None:
@@ -342,6 +405,10 @@ class MemoryManager:
             return PersistDecision(False, None, "", 0.0, "empty")
         if len(text) <= 8 and any(text.startswith(p) or lowered == p for p in SKIP_PHRASES):
             return PersistDecision(False, None, "", 0.0, "greeting")
+        if text.startswith("[后台]") or text.startswith("后台任务："):
+            return PersistDecision(False, None, "", 0.0, "background job")
+        if any(marker in text for marker in FORGET_MARKERS):
+            return PersistDecision(False, None, "", 0.0, "forget request")
         if any(marker in text for marker in FORCE_SAVE_MARKERS):
             return PersistDecision(True, "fact", text, 0.9, "user asked to remember", "long_term")
         if any(marker in text for marker in CORRECTION_MARKERS):
@@ -400,6 +467,43 @@ class MemoryManager:
             metadata={"user": user_text, "assistant": assistant_text[:400]},
         )
 
+    async def forget_memories(self, query: str = "", memory_id: int | None = None) -> str:
+        """Soft-delete matching long-term memories."""
+        assert self.long_term is not None
+        if memory_id is not None and str(memory_id) != "":
+            found = await self.long_term.get(int(memory_id))
+            count = await self.long_term.forget_ids([int(memory_id)])
+            if count:
+                return f"已忘掉 #{memory_id}：{(found or {}).get('summary') or (found or {}).get('content') or ''}"
+            return f"找不到还记得的 #{memory_id}。"
+        text = (query or "").strip()
+        if not text:
+            return "请说明要忘掉什么，或给出记忆编号。"
+        hits = await self.long_term.keyword_search(text, k=8)
+        if not hits:
+            vector = self.encode(text)
+            hits = await self.long_term.search(vector, k=5)
+            hits = [item for item in hits if float(item.get("score") or 0) >= 0.55]
+        if not hits:
+            return f"记忆里没有找到「{text}」。"
+        ids = [int(item["id"]) for item in hits[:5]]
+        count = await self.long_term.forget_ids(ids)
+        lines = [f"#{item['id']} {item.get('summary') or item.get('content')}" for item in hits[:count or len(ids)]]
+        return f"已忘掉 {count} 条：\n" + "\n".join(lines)
+
+    async def correct_memory(self, query: str, replacement: str) -> str:
+        """Forget matching memories and store the correction."""
+        forgotten = await self.forget_memories(query=query)
+        assert self.long_term is not None
+        new_id = await self.long_term.add(
+            content=(replacement or "").strip() or query,
+            kind="fact",
+            importance=0.85,
+            metadata={"corrected_from": query},
+            source="correction",
+        )
+        return f"{forgotten}\n已改记为 #{new_id}：{replacement}"
+
     async def add_identity_snapshot(self, yaml_text: str, note: str) -> None:
         """Store a raw identity YAML snapshot when evolution events occur."""
         assert self._db is not None
@@ -426,6 +530,24 @@ class MemoryManager:
         if self._db is not None:
             await self._db.close()
             self._db = None
+
+    async def kv_get(self, key: str) -> str | None:
+        """Read a small persistent key. Missing keys return None."""
+        assert self._db is not None
+        cursor = await self._db.execute("SELECT value FROM kv WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    async def kv_set(self, key: str, value: str) -> None:
+        """Upsert a small persistent key."""
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self._db.commit()
 
 
 def _as_hit(item: dict[str, Any], layer: str) -> MemoryHit:

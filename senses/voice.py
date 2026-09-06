@@ -333,6 +333,9 @@ class VoiceIO:
         if self._sensevoice is not None:
             try:
                 text = _transcribe_sensevoice(self._sensevoice, audio)
+                if looks_like_stt_hallucination(text):
+                    logger.info("STT sensevoice dropped hallucination {}", text)
+                    text = ""
                 if text:
                     logger.info("STT sensevoice {}", text)
                     return text
@@ -346,15 +349,20 @@ class VoiceIO:
                     beam_size=5,
                     vad_filter=False,
                     condition_on_previous_text=False,
-                    initial_prompt="以下是普通话的句子。",
                 )
                 text = "".join(segment.text for segment in segments).strip()
+                if looks_like_stt_hallucination(text):
+                    logger.info("STT whisper dropped hallucination {}", text)
+                    text = ""
                 if text:
                     logger.info("STT whisper ({}) {}", getattr(info, "language", "?"), text)
                     return text
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Whisper STT failed: {}", exc)
         text = _transcribe_google(audio)
+        if looks_like_stt_hallucination(text):
+            logger.info("STT google dropped hallucination {}", text)
+            return ""
         if text:
             logger.info("STT google {}", text)
         return text
@@ -372,7 +380,12 @@ class VoiceIO:
         """Play TTS while listening; stop and capture audio if the user talks over it."""
         cleaned = _for_speech(text)
         if not cleaned or not self.tts_available:
+            if not cleaned:
+                logger.info("TTS skip empty text")
+            elif not self.tts_available:
+                logger.warning("TTS unavailable, skip speak")
             return SpeakOutcome()
+        logger.info("TTS speak start engine={} chars={}", self.tts_engine, len(cleaned))
         self._tts_stop.clear()
         samples: np.ndarray | None = None
         play_sr = SAMPLE_RATE
@@ -380,13 +393,21 @@ class VoiceIO:
             synthesized = await self._synth_edge(cleaned)
             if synthesized is not None:
                 samples, play_sr = synthesized
+                logger.info("TTS edge synth ok samples={} sr={}", samples.size, play_sr)
+            else:
+                logger.warning("TTS edge synth failed, will try SAPI")
         if self._tts_stop.is_set():
+            logger.info("TTS interrupted before play reason=hotkey")
             return SpeakOutcome(interrupted=True, reason="hotkey")
         if samples is None:
             logger.info("TTS falling back to SAPI")
-            return await asyncio.to_thread(self._sapi_with_barge_in, cleaned)
+            outcome = await asyncio.to_thread(self._sapi_with_barge_in, cleaned)
+            logger.info("TTS sapi done interrupted={} reason={}", outcome.interrupted, outcome.reason)
+            return outcome
         playback = _resample(samples, play_sr, SAMPLE_RATE)
-        return await asyncio.to_thread(self._play_with_barge_in, playback)
+        outcome = await asyncio.to_thread(self._play_with_barge_in, playback)
+        logger.info("TTS play done interrupted={} reason={}", outcome.interrupted, outcome.reason)
+        return outcome
 
     async def _synth_edge(self, text: str) -> tuple[np.ndarray, int] | None:
         """Synthesize MP3 via Microsoft Edge neural voices, then decode to PCM."""
@@ -720,6 +741,25 @@ def strip_sensevoice_tags(text: str) -> str:
     """Remove SenseVoice language/emotion tags such as <|zh|>."""
     cleaned = _SENSEVOICE_TAG.sub("", text or "")
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def looks_like_stt_hallucination(text: str) -> bool:
+    """Drop silent-clip artifacts that are not real speech."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    compact = re.sub(r"[\s,，。.!！、?？:：]", "", raw)
+    if not compact:
+        return True
+    if "以下是普通话" in compact:
+        return True
+    junk = ("感谢观看", "字幕by", "请不吝点赞", "thankswatching")
+    lowered = compact.lower()
+    if any(token in lowered or token in compact for token in junk):
+        return True
+    if len(compact) >= 6 and len(set(compact)) <= 2:
+        return True
+    return False
 
 
 def _select_input_device(devices: Any, default_in: Any) -> int | None:

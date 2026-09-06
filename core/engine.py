@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from llm.adapters import BaseLLMAdapter
 from llm.gateway import LLMGateway
 from memory.manager import MemoryManager, TextEmbedder
 from tools.builtin import BuiltinTools
+from tools.jobs import JobQueue
 from tools.mcp import MCPBridge
 from tools.registry import ToolRegistry
 
@@ -45,6 +47,9 @@ class PersonalAIEngine:
         self.vision = vision
         self.graph: Any | None = None
         self._nodes: GraphNodes | None = None
+        self._turn_lock = asyncio.Lock()
+        self.jobs = JobQueue()
+        self._builtins: BuiltinTools | None = None
 
     def attach_vision(self, vision: Any) -> None:
         """Attach the vision subsystem after construction (avoids import cycles)."""
@@ -60,7 +65,10 @@ class PersonalAIEngine:
 
             self.vision = VisionIO(enabled=self.settings.vision_enabled)
             await self.vision.initialize()
-        builtins = BuiltinTools(self.settings, vision=self.vision)
+        builtins = BuiltinTools(
+            self.settings, vision=self.vision, memory=self.memory, jobs=self.jobs
+        )
+        self._builtins = builtins
         builtins.register_all(self.tools)
         extra = await self.mcp.list_tools()
         if extra:
@@ -84,6 +92,7 @@ class PersonalAIEngine:
         *,
         input_type: InputType = "text",
         image_path: str = "",
+        on_progress: Any | None = None,
     ) -> str:
         """Run one full turn through the six-node graph.
 
@@ -91,13 +100,32 @@ class PersonalAIEngine:
             user_input: User utterance or typed line.
             input_type: text, voice, image, or video (video treated as image+text).
             image_path: Optional image to analyze with this turn.
+            on_progress: Optional async callback(name, detail) for tool steps.
 
         Returns:
             Assistant reply text.
         """
         if self.graph is None:
             raise RuntimeError("Engine is not initialized")
+        async with self._turn_lock:
+            return await self._process_locked(
+                user_input, input_type=input_type, image_path=image_path, on_progress=on_progress
+            )
+
+    async def _process_locked(
+        self,
+        user_input: str,
+        *,
+        input_type: InputType = "text",
+        image_path: str = "",
+        on_progress: Any | None = None,
+    ) -> str:
+        """Run the graph while holding `_turn_lock`."""
+        if self._nodes is not None:
+            self._nodes.on_progress = on_progress
         text = (user_input or "").strip()
+        if self._builtins is not None:
+            self._builtins.last_user_text = text
         if not text and not image_path:
             return "我在听。你可以说话、打字，或者说「截个屏」。"
         state = empty_state(
@@ -106,7 +134,7 @@ class PersonalAIEngine:
             input_type=input_type,
             image_path=image_path,
         )
-        result = await self.graph.ainvoke(state, config={"recursion_limit": 32})
+        result = await self.graph.ainvoke(state, config={"recursion_limit": 48})
         return str(result.get("response") or "")
 
     async def self_check(self) -> dict[str, Any]:

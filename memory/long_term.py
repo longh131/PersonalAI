@@ -98,7 +98,10 @@ class LongTermMemory:
             k: Maximum hits to return.
         """
         cursor = await self._db.execute(
-            "SELECT id, kind, content, summary, importance, metadata_json, embedding FROM memories WHERE embedding IS NOT NULL"
+            """
+            SELECT id, kind, content, summary, importance, metadata_json, embedding FROM memories
+            WHERE embedding IS NOT NULL AND COALESCE(forgotten, 0) = 0
+            """
         )
         rows = await cursor.fetchall()
         scored = _score_rows(rows, query_vector)
@@ -129,7 +132,7 @@ class LongTermMemory:
             f"""
             SELECT id, kind, content, summary, importance, metadata_json
             FROM memories
-            WHERE {clauses}
+            WHERE COALESCE(forgotten, 0) = 0 AND ({clauses})
             ORDER BY importance DESC, id DESC
             LIMIT ?
             """,
@@ -149,6 +152,7 @@ class LongTermMemory:
             """
             SELECT id, kind, content, summary, importance, metadata_json
             FROM memories
+            WHERE COALESCE(forgotten, 0) = 0
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -162,6 +166,29 @@ class LongTermMemory:
             item["score"] = 1.0
             results.append(item)
         return results
+
+    async def forget_ids(self, ids: list[int]) -> int:
+        """Soft-delete memories so they no longer retrieve. Returns how many changed."""
+        wanted = [int(item) for item in ids if int(item) > 0]
+        if not wanted:
+            return 0
+        placeholders = ",".join("?" * len(wanted))
+        now = _utc_now()
+        cursor = await self._db.execute(
+            f"UPDATE memories SET forgotten = 1, updated_at = ? WHERE id IN ({placeholders}) AND COALESCE(forgotten, 0) = 0",
+            (now, *wanted),
+        )
+        await self._db.commit()
+        return int(cursor.rowcount or 0)
+
+    async def get(self, memory_id: int) -> dict[str, Any] | None:
+        """Fetch one memory including forgotten rows (for confirmations)."""
+        cursor = await self._db.execute(
+            "SELECT id, kind, content, summary, importance, metadata_json, COALESCE(forgotten, 0) AS forgotten FROM memories WHERE id = ?",
+            (int(memory_id),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
 
 
 def _score_rows(rows: list[aiosqlite.Row], query_vector: np.ndarray) -> list[dict[str, Any]]:

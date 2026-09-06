@@ -33,7 +33,7 @@ if errorlevel 1 (
 )
 
 echo [3/4] 安装语音 / 截屏 / 搜索依赖（失败也不影响键盘对话）...
-python -m pip install ddgs pillow mss pyttsx3 sounddevice edge-tts sherpa-onnx
+python -m pip install ddgs pillow mss pyttsx3 sounddevice edge-tts sherpa-onnx pystray
 python -m pip install sentence-transformers rapidocr-onnxruntime
 if errorlevel 1 (
     echo 向量/OCR 安装失败：仍可聊天，语义记忆会降级。推荐 Python 3.11 或 3.12。

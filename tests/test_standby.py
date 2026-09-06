@@ -20,7 +20,8 @@ def test_end_session_rejects_normal_talk() -> None:
     assert not _is_end_session("")
     assert not _is_end_session("今天天气怎么样")
     assert not _is_end_session("退出登录怎么搞")
-    assert not _is_end_session("不要退出")
+    assert not _is_end_session("我要走了")
+    assert not _is_end_session("下班了")
 
 
 def test_parse_ctrl_shift_l() -> None:

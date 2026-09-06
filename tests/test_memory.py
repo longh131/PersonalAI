@@ -23,6 +23,8 @@ async def test_greeting_is_not_persisted(memory: MemoryManager) -> None:
     assert decision.should_save is False
     inserted = await memory.maybe_persist("你好", "我在。", decision)
     assert inserted is None
+    background = memory.heuristic_decision("[后台]搜索公开资料", "好。")
+    assert background.should_save is False
 
 
 @pytest.mark.asyncio
