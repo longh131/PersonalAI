@@ -150,6 +150,7 @@ class PersonalAIEngine:
             "llm": llm_ok,
             "tools": tools_ok,
             "workspace": str(self.settings.resolve_workspace()),
+            "library": str(self.settings.resolve_library()),
             "root": str(PROJECT_ROOT),
         }
 

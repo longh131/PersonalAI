@@ -24,9 +24,9 @@ Personal AI OS = **人格 + 记忆 + 推理 + 行动 + 感官**。第一阶段�
 |---|---|
 | `config/` | `.env` 设置、`identity.yaml`、Hugging Face 离线策略 |
 | `identity/` | 人格六段：身份、使命、性格、用户模型、规则、进化 |
-| `memory/` | 短时窗口、工作任务、长期事实、经验、自我认知；SQLite + 向量 |
+| `memory/` | 短时窗口、工作任务、长期事实、经验、自我认知、已铺能力路；SQLite + 向量 |
 | `llm/` | DeepSeek 网关；GPT / Claude 适配器预留；提示词与解析 |
-| `tools/` | 读文件、搜文件、网页搜索、受限代码、截屏、识图、窗口、剪贴板、打开/切换应用、Outlook 日历、本机提醒、简报、后台任务、音量/锁屏/电源 |
+| `tools/` | 读文件、搜文件、网页搜索、受限代码、截屏、识图、窗口、剪贴板、打开/切换应用、Outlook 日历、本机提醒、简报、后台任务、音量/锁屏/电源、缺能力找路 |
 | `senses/` | 待机状态机、唤醒词、全局热键、托盘状态灯、SenseVoice、edge-tts、截屏 OCR |
 | `main.py` | 入口：`--download-models` / `--self-check` / `--text-only` / 待机 |
 

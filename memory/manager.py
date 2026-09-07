@@ -13,6 +13,7 @@ import numpy as np
 from loguru import logger
 
 from config.settings import Settings
+from memory.capabilities import CapabilityStore
 from memory.entities import EntityStore
 from memory.experience import ExperienceMemory
 from memory.long_term import LongTermMemory
@@ -132,6 +133,19 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS capabilities (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    source     TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL CHECK(status IN ('chosen','waiting_key','ready')),
+    homepage   TEXT NOT NULL DEFAULT '',
+    notes      TEXT NOT NULL DEFAULT '',
+    env_key    TEXT NOT NULL DEFAULT '',
+    forgotten  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -141,6 +155,10 @@ async def _migrate_schema(db: aiosqlite.Connection) -> None:
     columns = {row[1] for row in await cursor.fetchall()}
     if "forgotten" not in columns:
         await db.execute("ALTER TABLE memories ADD COLUMN forgotten INTEGER NOT NULL DEFAULT 0")
+    cursor = await db.execute("PRAGMA table_info(capabilities)")
+    cap_cols = {row[1] for row in await cursor.fetchall()}
+    if cap_cols and "env_key" not in cap_cols:
+        await db.execute("ALTER TABLE capabilities ADD COLUMN env_key TEXT NOT NULL DEFAULT ''")
 
 
 SKIP_PHRASES = ("你好", "您好", "在吗", "嗨", "hi", "hello", "hey", "早上好", "晚安")
@@ -235,6 +253,7 @@ class MemoryContext:
     self_hits: list[MemoryHit]
     self_knowledge: str
     entity_block: str = ""
+    capability_block: str = ""
 
 
 @dataclass(slots=True)
@@ -270,6 +289,7 @@ class MemoryManager:
         self.reminders: ReminderStore | None = None
         self.entities: EntityStore | None = None
         self.protocols: ProtocolStore | None = None
+        self.capabilities: CapabilityStore | None = None
 
     def encode(self, text: str) -> np.ndarray:
         """Embed text using the override or the configured embedder."""
@@ -298,6 +318,7 @@ class MemoryManager:
         self.reminders = ReminderStore(self._db)
         self.entities = EntityStore(self._db)
         self.protocols = ProtocolStore(self._db)
+        self.capabilities = CapabilityStore(self._db)
         if await self.self_memory.get("capabilities") is None:
             await self.self_memory.upsert(
                 "capabilities",
@@ -346,7 +367,20 @@ class MemoryManager:
             entity_block = self.entities.format_list(await self.entities.list_active())
             if "还没有记下" in entity_block:
                 entity_block = ""
-        overlay_parts = [part for part in (entity_block, "\n".join(f"- {bit}" for bit in user_bits)) if part]
+        capability_block = ""
+        if self.capabilities is not None:
+            capability_block = self.capabilities.as_prompt(await self.capabilities.list_active())
+            if "还没有铺过" in capability_block:
+                capability_block = ""
+        overlay_parts = [
+            part
+            for part in (
+                entity_block,
+                capability_block,
+                "\n".join(f"- {bit}" for bit in user_bits),
+            )
+            if part
+        ]
         return MemoryContext(
             identity_overlay="\n".join(overlay_parts),
             short_term_messages=self.short_term.window(),
@@ -356,6 +390,7 @@ class MemoryManager:
             self_hits=[_as_hit(item, "self") for item in self_hits],
             self_knowledge=await self.self_memory.all_text(),
             entity_block=entity_block,
+            capability_block=capability_block,
         )
 
     async def remember_turn(self, session_id: str, role: str, content: str) -> None:

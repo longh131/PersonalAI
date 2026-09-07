@@ -202,7 +202,8 @@ async def async_main(args: argparse.Namespace) -> int:
     health = await engine.self_check()
     print(
         f"内核就绪  session={health['session_id'][:8]}  "
-        f"工具={sum(1 for ok in health['tools'].values() if ok)}/4",
+        f"工具={sum(1 for ok in health['tools'].values() if ok)}/4  "
+        f"资料库={health.get('library', '')}",
         flush=True,
     )
     if args.self_check:

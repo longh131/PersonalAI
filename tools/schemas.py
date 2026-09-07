@@ -24,16 +24,25 @@ def openai_tool(name: str, description: str, properties: dict[str, Any], require
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     openai_tool(
         "read_file",
-        "读取本地文本文件内容。",
-        {"path": {"type": "string", "description": "文件路径，相对工作区或绝对路径。"}},
+        "读取本地文本文件。没指定目录时先找已存在的工作区/资料库文件；新建位置按类型进 notes/pdf/inbox 等。可说「桌面/xx」「笔记/xx」。",
+        {"path": {"type": "string", "description": "路径：相对名、绝对路径，或 桌面/资料库/音乐/图片/工作区 别名。"}},
+        ["path"],
+    ),
+    openai_tool(
+        "write_file",
+        "写入文本文件。未指明目录时按扩展名写入资料库子目录（txt→notes，无扩展名→inbox）。说「桌面」则写桌面。不要用 execute_code 写文件。",
+        {
+            "path": {"type": "string", "description": "如 备忘.txt、桌面/备忘.txt、合同.pdf。相对路径按类型自动进子目录。"},
+            "content": {"type": "string", "description": "要写入的全文。"},
+        },
         ["path"],
     ),
     openai_tool(
         "search_files",
-        "按 glob 模式在工作区内搜索文件。",
+        "按 glob 搜索文件。不指定 root 时：代码搜工作区；文档/媒体搜对应资料库子目录（*.txt→notes，*.pdf→pdf，*→inbox）。",
         {
-            "pattern": {"type": "string", "description": "glob 模式，例如 **/*.py"},
-            "root": {"type": "string", "description": "可选搜索根目录。"},
+            "pattern": {"type": "string", "description": "glob 模式，例如 **/*.py、*.txt、*.pdf、*"},
+            "root": {"type": "string", "description": "可选。笔记/收件箱/pdf目录/word目录/表格/幻灯片/音乐/图片/视频/桌面/工作区。"},
         },
         ["pattern"],
     ),
@@ -84,8 +93,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     openai_tool(
         "open_app",
-        "打开应用、文件、文件夹或网页。别名包括记事本、计算器、浏览器、资源管理器、Cursor、VS Code。用户说「打开XX」时用这个。",
-        {"target": {"type": "string", "description": "应用名、别名、可执行文件、路径或 http(s) URL。"}},
+        "打开应用、网址，或打开资料库/桌面里的文件和文件夹。打开文件时用 Windows 默认程序（与资源管理器双击相同），不要指定播放器或 Word。浏览未分类文件夹用「收件箱」或「浏览」。",
+        {"target": {"type": "string", "description": "应用名，或 笔记/收件箱/pdf目录/音乐/图片/视频/桌面/资料库/带扩展名的文件名。"}},
         ["target"],
     ),
     openai_tool(
@@ -232,9 +241,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     openai_tool(
         "delete_file",
-        "删除工作区内的一个文件（不能删目录、不能删工作区外）。必须 confirm=true，且用户本轮明确说了「确认」。",
+        "删除资料库、工作区或桌面上的一个文件（不能删目录、不能扫全盘）。必须 confirm=true，且用户本轮明确说了「确认」。",
         {
-            "path": {"type": "string", "description": "相对工作区或绝对路径。"},
+            "path": {"type": "string", "description": "相对名、别名或绝对路径。"},
             "confirm": {"type": "boolean", "description": "仅当用户本轮说了确认时为 true。"},
         },
         ["path"],
@@ -247,6 +256,60 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "confirm": {"type": "boolean", "description": "仅当用户本轮说了确认时为 true。"},
         },
         ["action"],
+    ),
+    openai_tool(
+        "find_capability",
+        "现有工具交不了差时找路：搜正规数据源/API/文档，列出最多3条带来源链接的候选，并请示用户。用户要序列行情、缺接口、说「找路」时用。不要用新闻综述假装完成。不装包、不改程序。",
+        {"need": {"type": "string", "description": "缺什么能力，例如：A股近半年收盘价和成交额。"}},
+        ["need"],
+    ),
+    openai_tool(
+        "list_capabilities",
+        "列出已经和用户铺过的能力路（选定的源、是否还在等Key）。",
+        {},
+        [],
+    ),
+    openai_tool(
+        "save_capability",
+        "把用户选定的能力路记下来，下次同类问题先走这条。必须本轮说了「记下」或「确认」，且 confirm=true。不写密钥、不装包。",
+        {
+            "name": {"type": "string", "description": "能力短名，如 A股日线。"},
+            "source": {"type": "string", "description": "选用的源或产品名。"},
+            "status": {"type": "string", "description": "chosen / waiting_key / ready，或中文：已选定、等Key、可用。缺Key用 waiting_key。"},
+            "homepage": {"type": "string", "description": "必须是本轮搜索里出现过的链接，没有就留空。"},
+            "notes": {"type": "string", "description": "用户还要做什么，如去某页申请 token。"},
+            "confirm": {"type": "boolean", "description": "仅当用户本轮说了记下或确认时为 true。"},
+        },
+        ["name", "source"],
+    ),
+    openai_tool(
+        "set_capability_secret",
+        "把用户提供的 API Key/Token 写入本机 .env，并让当前进程立刻能用。必须本轮说了确认。不要在对用户的话里复述密钥。不能覆盖 DEEPSEEK_API_KEY。",
+        {
+            "env_key": {"type": "string", "description": "如 QWEATHER_API_KEY、TUSHARE_TOKEN。"},
+            "value": {"type": "string", "description": "密钥本身，只进 .env。"},
+            "name": {"type": "string", "description": "对应的能力短名，如 天气、A股日线。"},
+            "confirm": {"type": "boolean", "description": "用户本轮说了确认则为 true。"},
+        },
+        ["env_key", "value"],
+    ),
+    openai_tool(
+        "install_capability_package",
+        "仅安装白名单包到当前 venv：akshare、tushare。必须确认。不改小派源码。",
+        {
+            "package": {"type": "string", "description": "akshare 或 tushare。"},
+            "confirm": {"type": "boolean"},
+        },
+        ["package"],
+    ),
+    openai_tool(
+        "use_capability",
+        "调用已经接上的能力。天气（和风 Key 或 Open-Meteo）；A 股日线（Tushare 或 akshare）。不支持的种类会明确拒绝。用户问天气、或给出股票代码查收盘成交额时用。",
+        {
+            "kind": {"type": "string", "description": "weather / stock / auto。"},
+            "query": {"type": "string", "description": "用户原话，可含城市或股票代码。"},
+        },
+        [],
     ),
 ]
 

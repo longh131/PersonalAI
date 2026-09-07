@@ -50,7 +50,14 @@ async def test_desktop_tools_registered(tmp_path) -> None:
         "set_volume",
         "lock_pc",
         "delete_file",
+        "write_file",
         "power_action",
+        "find_capability",
+        "save_capability",
+        "list_capabilities",
+        "use_capability",
+        "set_capability_secret",
+        "install_capability_package",
     ):
         assert name in registry.names()
     denied = await registry.execute(

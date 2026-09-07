@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     tts_voice: str = "zh-CN-XiaoxiaoNeural"
     vision_enabled: bool = True
     workspace_root: str = Field(default=".")
+    pai_lib_root: str = ""
     mcp_server_url: str = ""
 
     # Voice session (seconds / energy). Tune in .env without code changes.
@@ -80,6 +81,16 @@ class Settings(BaseSettings):
             path = PROJECT_ROOT / path
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def resolve_library(self) -> Path:
+        """Return the personal library root (PaiLib), creating standard subfolders."""
+        from tools.library import ensure_library
+
+        raw = (self.pai_lib_root or "").strip()
+        path = Path(raw).expanduser() if raw else Path.home() / "PaiLib"
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return ensure_library(path)
 
     def resolve_workspace(self) -> Path:
         """Return the workspace root used by file tools."""

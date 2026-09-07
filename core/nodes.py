@@ -13,6 +13,8 @@ from identity.loader import IdentityLoader
 from llm.gateway import LLMGateway
 from memory.manager import MemoryManager, PersistDecision
 from tools.builtin import looks_like_image_path
+from tools.capability import looks_like_capability_gap
+from tools.runners import looks_like_weather
 from tools.registry import ToolRegistry
 
 TOOL_PROGRESS_LABELS = {
@@ -45,6 +47,12 @@ TOOL_PROGRESS_LABELS = {
     "lock_pc": "锁定电脑",
     "delete_file": "删除文件",
     "power_action": "电源操作",
+    "find_capability": "查找能力路径",
+    "list_capabilities": "查看已铺的路",
+    "save_capability": "记下能力路径",
+    "set_capability_secret": "写入能力密钥",
+    "install_capability_package": "安装白名单包",
+    "use_capability": "调用已接能力",
     "_reply": "整理答复",
 }
 
@@ -87,6 +95,10 @@ class GraphNodes:
             intent["image_path"] = text.strip().strip('"')
         if any(token in lowered for token in ("搜索", "search", "搜一下")):
             intent["kind"] = "search"
+        if looks_like_capability_gap(text):
+            intent["kind"] = "capability"
+        if looks_like_weather(text):
+            intent["kind"] = "weather"
         logger.info("parse_input kind={}", intent["kind"])
         return {
             "parsed_intent": intent,
@@ -120,6 +132,7 @@ class GraphNodes:
             "retrieved_memories": hits,
             "working_snapshot": bundle.working_snapshot,
             "vision_block": vision_block,
+            "capability_block": bundle.capability_block or "（无）",
         }
 
     async def reason_decide(self, state: AgentState) -> dict[str, Any]:
@@ -136,6 +149,7 @@ class GraphNodes:
             memory_block=memory_block,
             working_block=working_block,
             vision_block=state.get("vision_block") or "（无）",
+            capability_block=state.get("capability_block") or "（无）",
         )
         history = [
             item
@@ -185,6 +199,25 @@ class GraphNodes:
             tool_calls = [
                 {"id": "auto_brief", "name": "daily_briefing", "arguments": {"kind": brief_kind}}
             ]
+        if intent.get("kind") == "weather" and int(state.get("iteration") or 0) == 0:
+            if not any(str(item.get("name") or "") == "use_capability" for item in tool_calls):
+                tool_calls.append(
+                    {
+                        "id": "auto_weather",
+                        "name": "use_capability",
+                        "arguments": {"kind": "weather", "query": str(state.get("user_input") or "")},
+                    }
+                )
+        if intent.get("kind") == "capability" and int(state.get("iteration") or 0) == 0:
+            names = {str(item.get("name") or "") for item in tool_calls}
+            if "use_capability" not in names and "find_capability" not in names:
+                tool_calls.append(
+                    {
+                        "id": "auto_use_cap",
+                        "name": "use_capability",
+                        "arguments": {"kind": "auto", "query": str(state.get("user_input") or "")},
+                    }
+                )
         decision = "use_tool" if tool_calls else "respond"
         iteration = int(state.get("iteration") or 0)
         if decision == "use_tool":

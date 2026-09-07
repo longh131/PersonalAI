@@ -91,7 +91,7 @@ async def test_delete_and_power_need_spoken_confirm(tmp_path: Path) -> None:
     assert not target.exists()
 
     outside = await tools.delete_file(str(Path(__file__).resolve()), confirm=True)
-    assert "工作区" in outside
+    assert "只能删除" in outside
 
     tools.last_user_text = "关机"
     power = await tools.power_action("shutdown", confirm=False)

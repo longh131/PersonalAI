@@ -23,6 +23,7 @@ class AgentState(TypedDict, total=False):
     retrieved_memories: list[dict[str, Any]]
     working_snapshot: dict[str, Any]
     vision_block: str
+    capability_block: str
     reasoning: str
     decision: Decision
     tool_calls: list[dict[str, Any]]
